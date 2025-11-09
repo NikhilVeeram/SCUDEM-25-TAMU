@@ -1,10 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-target_func = lambda x, mu=0.0, sigma=1.0: 3 * (1.0 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-start_func = lambda x: 0.25 * np.ones_like(x)
-# second_target = lambda x: 0.5*np.exp(-10*(x+2))
-second_target = lambda x, mu=0.0, sigma=1.0: (1.0 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * (((x+1) - mu) / sigma) ** 2)
+target_func = lambda x, mu=0.0, sigma=1.0: 2 * (1.0 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+start_func = lambda x, mu=0.5, sigma=1.0: 2 * (1.0 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+# start_func = lambda x: 0.2 * np.ones_like(x)
+# second_target = lambda x: 0.5*np.exp(-2*(x+1.2))
+second_target = lambda x, mu=-0.5, sigma=1.0: 2 * (1.0 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
 def taylor_coeffs(func, n, a=0.0, radius=0.5):
     """
@@ -74,18 +75,25 @@ plot_interval = 50
 # interpolate coefficients from start -> target and save checkpoints
 steps = 1000
 checkpoint_interval = max(1, plot_interval)  # use plot_interval from above to decide how often to save
-cs = np.asarray(coeffs_s, dtype=float)
-ct = np.asarray(coeffs_t, dtype=float)
-ct2 = np.asarray(coeffs_t2, dtype=float)
+model_coeffs = np.asarray(coeffs_s, dtype=float)
+data_coeffs = np.asarray(coeffs_t, dtype=float)
+final_data_coeffs = np.asarray(coeffs_t2, dtype=float)
+
+rate_of_learning = 0.005
+rate_of_data_change = 0.005
+self_train = 0.05
 
 saved_coeffs = []
 saved_coeffs2 = []  # also save second target interpolation for reference
-for i, w in enumerate(np.linspace(0.0, 1.0, steps + 1)):
-    ci2 = (1.0 - w) * ct + w * ct2
-    ci = (1.0 - w) * cs + w * ci2
+for i, u in enumerate(np.linspace(0.0, 1.0, steps + 1)):
+    data_change_norm = rate_of_data_change * (steps - i) / steps  # decrease w as we approach target
+    self_train_norm = self_train * (i) / steps  # decrease self_train as we approach target
+    data_coeffs = (1.0 - data_change_norm - self_train_norm) * data_change_norm + self_train_norm * model_coeffs + data_change_norm * final_data_coeffs
+
+    model_coeffs = (1.0 - rate_of_learning) * model_coeffs + rate_of_learning * data_coeffs
     if (i % checkpoint_interval) == 0 or i == steps:
-        saved_coeffs.append(ci.copy())
-        saved_coeffs2.append(ci2.copy())  # also save second target interpolation for reference
+        saved_coeffs.append(model_coeffs.copy())
+        saved_coeffs2.append(data_coeffs.copy())  # also save second target interpolation for reference
 
 # plot checkpoints with opacity increasing for more recent checkpoints
 plt.figure(figsize=(8, 5))
