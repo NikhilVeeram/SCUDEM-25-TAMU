@@ -8,13 +8,13 @@ import matplotlib.pyplot as plt
 # ============================
 STEPS = 1000
 MODEL_IMPROVEMENT_RATE = 0.02
-SELF_LEARNING = 0.02                  # nominal k_S (max value after ramp)
-SELF_LEARNING_RAMP_STEPS = 50         # ramp length after t_start
+SELF_LEARNING = 0.02
+SELF_LEARNING_RAMP_STEPS = 50
 DATA_IMPROVEMENT_RATE = 0.05
 PLOT_INTERVAL = 5
 START_SELF_LEARNING_LATE = True
 SELF_LEARNING_START_FRACTION = 0.25
-N_MODELS = 2
+N_MODELS = 1  # single model version
 
 # ============================
 # Zipf & vocab
@@ -23,17 +23,13 @@ VOCAB_SIZE = 400
 ZIPF_S = 1.1
 ranks = np.arange(1, VOCAB_SIZE + 1)
 
-# Dataset vs model scale and human content injection
 DATASET_SIZE_RATIO = 100.0
 HUMAN_CONTENT_RATE = 0.015
 TAIL_FRACTION = 0.30
 
-# q(t) construction (tuned)
 WG, WL = 0.5, 0.5
 ALPHA_SENS = 0.50
 W_WIN = 15
-
-# Contamination scale into D
 GAMMA = 0.05
 EPS = 1e-12
 
@@ -45,13 +41,12 @@ FIG_DIR = os.path.join("figures", EXPERIMENT_NAME)
 os.makedirs(FIG_DIR, exist_ok=True)
 
 def savefig(name):
-    """Save current figure in FIG_DIR as PNG."""
     path = os.path.join(FIG_DIR, f"{name}.png")
     plt.savefig(path, dpi=300, bbox_inches="tight")
     print(f"[Saved] {path}")
 
 # ============================
-# Zipf helpers & initial dists
+# Zipf helpers
 # ============================
 zipf_base = 1.0 / np.power(ranks, ZIPF_S)
 zipf_base = zipf_base / zipf_base.sum()
@@ -108,7 +103,6 @@ def q_t(D, H_H, Amax_star):
     return float(np.clip(WG * q_global(D, H_H) + WL * q_local(D, Amax_star), 0.0, 1.0))
 
 def S_gate(step, steps_total):
-    """Ramped S(t): 0 until t_start, then linear ramp to SELF_LEARNING over SELF_LEARNING_RAMP_STEPS."""
     if not START_SELF_LEARNING_LATE:
         return SELF_LEARNING
     t_start = int(SELF_LEARNING_START_FRACTION * steps_total)
@@ -124,7 +118,7 @@ def contam_from_f(f):
     return w / (w.sum() + EPS)
 
 # ============================
-# Initialize datasets & models
+# Initialize dataset and model
 # ============================
 D_public = make_zipf_gaussian(center_rank=90, width=35)
 D_ref = D_public.copy()
@@ -135,15 +129,11 @@ H_H = shannon_entropy(H)
 Amax_star = sliding_window_max_mean_negDlogD(H, W_WIN)
 entropy_baseline = shannon_entropy(D_ref)
 
-models = []
-for i in range(N_MODELS):
-    shift = (i - (N_MODELS - 1) / 2.0) * 5.0
-    slope = (0.02 + 0.01 * (i % 2)) * (1 if i % 2 == 0 else -1)
-    f_init = make_zipf_variant(center_rank_shift=5 + 2*shift, slope_delta=-slope, noise_scale=0.015 + 0.003*i)
-    D_init = make_zipf_variant(center_rank_shift=shift, slope_delta=slope, noise_scale=0.010 + 0.002*i)
-    models.append({"f": f_init, "D": D_init})
+f_init = make_zipf_variant(center_rank_shift=5, slope_delta=-0.02, noise_scale=0.015)
+D_init = make_zipf_variant(center_rank_shift=0, slope_delta=0.02, noise_scale=0.010)
+model = {"f": f_init, "D": D_init}
 
-y_target_og = models[0]["D"].copy()
+y_target_og = model["D"].copy()
 y_second_target_og = D_public.copy()
 
 tail_start = int((1.0 - TAIL_FRACTION) * VOCAB_SIZE)
@@ -156,23 +146,15 @@ mse, kl_series, js_series = [], [], []
 q_stagnation, q_tail_ratio, q_entropy_ratio = [], [], []
 q_series, Hratio_series, S_series = [], [], []
 H_xt = []
-snapshots_all_models = [[] for _ in range(N_MODELS)]
+snapshots_model = []
 
 # ============================
-# Iteration loop
-# ============================
-
-# ============================
-# Plot initial distributions (restored)
+# Plot initial distributions
 # ============================
 plt.figure(figsize=(9,5))
-base_colors = plt.cm.tab10(np.linspace(0,1,N_MODELS))  # clearer, high-contrast colors
-
-for i, m in enumerate(models):
-    plt.plot(ranks, m["D"], lw=1.8, color=base_colors[i], label=f"target {i+1} (2023)")
-    plt.plot(ranks, m["f"], lw=1.2, linestyle="--", color=base_colors[i], alpha=0.7, label=f"start {i+1}")
-
-plt.plot(ranks, D_public, color="black", lw=2.2, label="public dataset D (2025)")
+plt.plot(ranks, model["D"], lw=1.8, color="tab:blue", label="target (2023)")
+plt.plot(ranks, model["f"], lw=1.2, linestyle="--", color="tab:blue", alpha=0.7, label="start (2023)")
+plt.plot(ranks, D_public, color="black", lw=2.0, label="public dataset D (2025)")
 plt.xlabel("Token rank (1 = most frequent)")
 plt.ylabel("Probability")
 plt.title("Initial Zipfian Target and Start Distributions")
@@ -182,33 +164,33 @@ plt.tight_layout()
 savefig("initial_distributions")
 plt.show()
 
-
+# ============================
+# Iteration loop
+# ============================
 for step in range(STEPS):
     Sval = S_gate(step, STEPS)
     qval = q_t(D_public, H_H, Amax_star)
     coef = (MODEL_IMPROVEMENT_RATE + Sval) * (1.0 + ALPHA_SENS * qval)
 
-    contaminations = []
-    for m in models:
-        m["f"] = m["f"] + coef * (D_public - m["f"])
-        m["f"] = np.clip(m["f"], 1e-12, None); m["f"] /= m["f"].sum()
-        contam_scale = Sval / DATASET_SIZE_RATIO
-        C_f = contam_from_f(m["f"])
-        contaminations.append(C_f)
+    # model update
+    model["f"] = model["f"] + coef * (D_public - model["f"])
+    model["f"] = np.clip(model["f"], 1e-12, None); model["f"] /= model["f"].sum()
 
-        m["D"] = (1 - DATA_IMPROVEMENT_RATE - contam_scale) * m["D"] \
+    contam_scale = Sval / DATASET_SIZE_RATIO
+    C_f = contam_from_f(model["f"])
+    model["D"] = (1 - DATA_IMPROVEMENT_RATE - contam_scale) * model["D"] \
                  + DATA_IMPROVEMENT_RATE * D_public + contam_scale * C_f
-        m["D"] = np.clip(m["D"], 1e-12, None); m["D"] /= m["D"].sum()
+    model["D"] = np.clip(model["D"], 1e-12, None); model["D"] /= model["D"].sum()
 
-    C_avg = np.mean(contaminations, axis=0)
+    # dataset update
     D_public = D_public + HUMAN_CONTENT_RATE * H \
                + DATA_IMPROVEMENT_RATE * (H - D_public) \
-               + GAMMA * Sval * C_avg
+               + GAMMA * Sval * C_f
     D_public = np.clip(D_public, 1e-12, None); D_public /= D_public.sum()
 
+    # diagnostics
     H_xt.append(-D_public * np.log(D_public + EPS))
-
-    f0 = models[0]["f"]
+    f0 = model["f"]
     cosine_stag = np.dot(f0, y_target_og) / (np.linalg.norm(f0) * np.linalg.norm(y_target_og))
     q_stagnation.append(cosine_stag)
 
@@ -221,15 +203,13 @@ for step in range(STEPS):
     mse.append(np.mean((f0 - D_ref) ** 2))
     kl_series.append(KL(f0, D_public))
     js_series.append(JS(f0, D_public))
-
     H_D = shannon_entropy(D_public)
     Hratio_series.append(H_D / (H_H + EPS))
     q_series.append(qval)
     S_series.append(Sval)
 
     if (step % PLOT_INTERVAL) == 0 or step == STEPS - 1:
-        for j, m in enumerate(models):
-            snapshots_all_models[j].append(m["f"].copy())
+        snapshots_model.append(f0.copy())
 
 H_xt = np.array(H_xt)
 
@@ -237,40 +217,36 @@ H_xt = np.array(H_xt)
 # Plots (autosaved)
 # ============================
 
-# ----------------------------
-# Convergence plot (temporal overlay replacement)
-# ----------------------------
+# Convergence plot (temporal overlay)
 plt.figure(figsize=(9,6))
-colors = plt.cm.viridis(np.linspace(0,1,N_MODELS))
-for j, snapshots in enumerate(snapshots_all_models):
-    for idx, dist in enumerate(snapshots):
-        alpha = 0.05 + 0.75 * (idx / len(snapshots))
-        plt.plot(ranks, dist, color=colors[j], alpha=alpha)
+for idx, dist in enumerate(snapshots_model):
+    alpha = 0.05 + 0.75 * (idx / len(snapshots_model))
+    plt.plot(ranks, dist, color="tab:blue", alpha=alpha)
 plt.plot(ranks, y_second_target_og, "k--", label="public 2025 dataset (ref)")
 plt.xlabel("Token rank (1 = most frequent)")
 plt.ylabel("Probability")
-plt.title("Convergence of All Models under Zipfian Dynamics (Temporal Overlay)")
+plt.title("Convergence of Model under Zipfian Dynamics (Temporal Overlay)")
 plt.legend(); plt.grid(True); plt.tight_layout()
 savefig("convergence_all_models"); plt.show()
 
 # MSE over time
 plt.figure(figsize=(9,5))
 plt.plot(mse, color="red")
-plt.xlabel("Iteration"); plt.ylabel("MSE (model 0 vs public 2025 ref)")
+plt.xlabel("Iteration"); plt.ylabel("MSE (model vs ref)")
 plt.title("MSE over Time")
 plt.grid(True); plt.tight_layout()
 savefig("mse_over_time"); plt.show()
 
-# KL & JS divergence
+# KL & JS
 plt.figure(figsize=(9,5))
-plt.plot(kl_series, label="KL(f0 || D)", lw=1.5)
-plt.plot(js_series, label="JS(f0, D)", lw=1.5)
+plt.plot(kl_series, label="KL(f||D)", lw=1.5)
+plt.plot(js_series, label="JS(f,D)", lw=1.5)
 plt.xlabel("Iteration"); plt.ylabel("Divergence")
 plt.title("Model–Dataset Divergence (KL & JS)")
 plt.grid(True); plt.legend(); plt.tight_layout()
 savefig("kl_js_over_time"); plt.show()
 
-# q(t), entropy ratio, and S(t)
+# q(t), entropy ratio, S(t)
 fig, axs = plt.subplots(3,1, figsize=(10,9), sharex=True)
 axs[0].plot(q_series); axs[0].set_ylabel('q(t)')
 axs[1].plot(Hratio_series); axs[1].set_ylabel(r'$H_D/H_H$')
@@ -288,7 +264,7 @@ plt.title("Stagnation & Diversity Diagnostics (Legacy)")
 plt.legend(); plt.grid(True); plt.tight_layout()
 savefig("stagnation_diagnostics"); plt.show()
 
-# Entropy heatmap
+# Entropy heatmaps
 plt.figure(figsize=(10,6))
 plt.imshow(H_xt.T, aspect='auto', cmap='plasma', origin='lower')
 plt.xlabel('Iteration'); plt.ylabel('Token rank')
@@ -296,7 +272,6 @@ plt.title('Local Shannon Entropy Heatmap H(x,t)')
 plt.colorbar(label='Entropy contribution')
 plt.tight_layout(); savefig("entropy_heatmap"); plt.show()
 
-# ΔEntropy map
 dH_xt = H_xt[1:] - H_xt[:-1]
 plt.figure(figsize=(10,6))
 plt.imshow(dH_xt.T, aspect='auto', cmap='seismic', origin='lower', vmin=-0.001, vmax=0.001)
@@ -341,23 +316,11 @@ quality_df = pd.DataFrame({
     "q(t)": q_series,
     "H_ratio": Hratio_series,
     "S(t)": S_series,
-    "MSE(model0_vs_ref)": mse,
-    "KL(f0||D)": kl_series,
-    "JS(f0,D)": js_series,
+    "MSE(model_vs_ref)": mse,
+    "KL(f||D)": kl_series,
+    "JS(f,D)": js_series,
     "q_stagnation": q_stagnation,
     "q_tail_ratio": q_tail_ratio,
     "q_entropy_ratio": q_entropy_ratio
 })
 quality_df.to_csv(os.path.join(FIG_DIR, "quality_metrics.csv"), index=False)
-
-if os.path.exists(csv_path):
-    df_plot = pd.read_csv(csv_path)
-    plt.figure(figsize=(10,5))
-    for col in df_plot.columns:
-        series = df_plot[col]
-        mask = series.notna()
-        plt.plot(np.arange(len(series[mask])), series[mask], label=col)
-    plt.xlabel("Iteration"); plt.ylabel("MSE")
-    plt.title("MSEs from CSV (all experiments)")
-    plt.grid(True); plt.legend(); plt.tight_layout()
-    savefig("aggregate_MSEs"); plt.show()
